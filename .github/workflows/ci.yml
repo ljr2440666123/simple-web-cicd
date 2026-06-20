@@ -138,8 +138,6 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
-    environment:
-      name: production
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -149,6 +147,32 @@ jobs:
         with:
           name: docker-image
           path: ./
+
+      - name: 验证并显示下载的文件
+        run: |
+          echo "=== 当前目录文件 ==="
+          ls -lh
+          echo ""
+          echo "=== 检查必要文件 ==="
+          if [ -f "simple-web.tar.gz" ]; then
+            echo "simple-web.tar.gz exists"
+          else
+            echo "simple-web.tar.gz NOT found"
+          fi
+          if [ -f "docker-compose.prod.yml" ]; then
+            echo "docker-compose.prod.yml exists"
+          else
+            echo "docker-compose.prod.yml NOT found"
+          fi
+
+      - name: 检查 SSH 配置
+        run: |
+          echo "=== SSH 客户端版本 ==="
+          ssh -V 2>&1
+          echo ""
+          echo "=== 部署信息 ==="
+          echo "Server: ${{ secrets.SSH_HOST }}"
+          echo "User: ${{ secrets.SSH_USERNAME }}"
 
       - name: 设置 SSH 端口变量
         id: ssh-config
