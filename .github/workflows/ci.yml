@@ -82,25 +82,35 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 设置镜像标签（带 commit hash）
+      - name: 检查 Docker 环境
+        run: |
+          echo "=== Docker 信息 ==="
+          docker --version
+          echo ""
+          echo "=== 当前目录 ==="
+          pwd
+          ls -la
+          echo ""
+          echo "=== Dockerfile 内容 ==="
+          cat Dockerfile
+
+      - name: 设置镜像标签
         id: image-tag
         run: |
           echo "IMAGE_FULL_TAG=${{ env.IMAGE_NAME }}:${{ github.sha }}" >> $GITHUB_OUTPUT
           echo "使用标签: ${{ env.IMAGE_NAME }}:${{ github.sha }}"
 
-      - name: 设置 Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
       - name: 构建 Docker 镜像
         run: |
-          echo "=== 构建镜像 ==="
-          docker build -t ${{ env.IMAGE_NAME }}:${{ github.sha }} .
-          docker tag ${{ env.IMAGE_NAME }}:${{ github.sha }} ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          echo "=== 构建镜像 (sha: ${{ github.sha }}) ==="
+          docker build -t simple-web:latest .
+          docker tag simple-web:latest simple-web:${{ github.sha }}
+          echo ""
           echo "=== 构建完成 ==="
-          docker images | grep ${{ env.IMAGE_NAME }}
+          docker images | grep simple-web
           echo ""
           echo "=== 镜像大小 ==="
-          docker image inspect ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} --format='{{.Size}} bytes'
+          docker image inspect simple-web:latest --format='{{.Size}} bytes'
 
       - name: 导出镜像为 tar 压缩包
         run: |
