@@ -140,23 +140,41 @@ jobs:
           name: docker-image
           path: ./
 
-      - name: 验证文件
+      - name: 设置 SSH 端口变量
+        id: ssh-config
         run: |
-          echo "=== 当前目录文件 ==="
-          ls -lh simple-web.tar.gz docker-compose.prod.yml
-          echo ""
-          echo "=== 文件大小 ==="
-          du -h simple-web.tar.gz
+          if [ -n "${{ secrets.SSH_PORT }}" ]; then
+            echo "SSH_PORT=${{ secrets.SSH_PORT }}" >> $GITHUB_OUTPUT
+          else
+            echo "SSH_PORT=22" >> $GITHUB_OUTPUT
+          fi
+          echo "使用 SSH 端口: $SSH_PORT (从 GitHub 输出读取)"
 
-      - name: 传输镜像和 compose 文件到服务器
+      - name: 验证传输文件
+        run: |
+          echo "=== 待传输文件 ==="
+          ls -lh simple-web.tar.gz docker-compose.prod.yml
+
+      - name: 传输 docker-compose.prod.yml 到服务器
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USERNAME }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ secrets.SSH_PORT || 22 }}
-          source: "docker-compose.prod.yml,simple-web.tar.gz"
-          target: "${{ env.DEPLOY_DIR }}/"
+          port: ${{ steps.ssh-config.outputs.SSH_PORT }}
+          source: "docker-compose.prod.yml"
+          target: "/opt/simple-web/"
+          strip_components: 0
+
+      - name: 传输镜像 tar.gz 到服务器
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ steps.ssh-config.outputs.SSH_PORT }}
+          source: "simple-web.tar.gz"
+          target: "/opt/simple-web/"
           strip_components: 0
 
       - name: 在服务器上加载镜像并启动服务
@@ -165,43 +183,57 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USERNAME }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ secrets.SSH_PORT || 22 }}
+          port: ${{ steps.ssh-config.outputs.SSH_PORT }}
           script: |
-            set -e
-            cd ${{ env.DEPLOY_DIR }}
-
+            DEPLOY_DIR="/opt/simple-web"
             echo "========================================"
             echo " 开始部署 — $(date)"
             echo "========================================"
 
             echo ""
-            echo "=== [1/6] 检查 Docker 环境 ==="
+            echo "=== [1/6] 准备目录 & 检查 Docker 环境 ==="
+            mkdir -p $DEPLOY_DIR
+            cd $DEPLOY_DIR
+            pwd
+            ls -la
             docker --version
             docker compose version
 
             echo ""
             echo "=== [2/6] 解压并加载 Docker 镜像 ==="
-            gunzip -f simple-web.tar.gz
-            echo "  加载镜像中..."
-            docker load -i simple-web.tar
-            rm -f simple-web.tar
-            echo "  当前镜像:"
-            docker images | grep simple-web
+            if [ -f "simple-web.tar.gz" ]; then
+              gunzip -f simple-web.tar.gz
+              echo "  正在加载镜像..."
+              docker load -i simple-web.tar
+              rm -f simple-web.tar
+              echo "  当前镜像:"
+              docker images | grep simple-web
+            else
+              echo "  ❌ 未找到 simple-web.tar.gz 文件"
+              ls -la
+              exit 1
+            fi
 
             echo ""
             echo "=== [3/6] 准备 compose 配置 ==="
-            cp docker-compose.prod.yml docker-compose.yml
-            cat docker-compose.yml
+            if [ -f "docker-compose.prod.yml" ]; then
+              cp docker-compose.prod.yml docker-compose.yml
+              echo "  compose 配置内容:"
+              cat docker-compose.yml
+            else
+              echo "  ❌ 未找到 docker-compose.prod.yml"
+              exit 1
+            fi
 
             echo ""
             echo "=== [4/6] 停止并清理旧容器 ==="
-            docker compose down --remove-orphans || true
-            docker container prune -f 2>/dev/null || true
+            docker compose down --remove-orphans || echo "  (无旧容器)"
+            docker container prune -f > /dev/null 2>&1 || true
 
             echo ""
             echo "=== [5/6] 启动新容器 ==="
             docker compose up -d
-            sleep 3
+            sleep 5
 
             echo ""
             echo "=== [6/6] 健康检查 ==="
@@ -215,22 +247,24 @@ jobs:
             HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:80 2>/dev/null || echo "000")
             echo "  HTTP 响应码: $HTTP_CODE"
             if [ "$HTTP_CODE" = "200" ]; then
-              echo "  ✅ 部署成功！"
               echo ""
               echo "  响应内容:"
               curl -s http://localhost:80 | head -5
+              echo ""
+              echo "========================================"
+              echo "  ✅ 部署成功 — $(date)"
+              echo "========================================"
             else
-              echo "  ⚠️  返回 $HTTP_CODE，部署可能存在问题"
+              echo "  ⚠️  返回码 $HTTP_CODE，部署可能存在问题"
               echo ""
               echo "  详细日志:"
               docker compose logs
+              echo ""
+              echo "========================================"
+              echo "  ❌ 部署失败"
+              echo "========================================"
               exit 1
             fi
-
-            echo ""
-            echo "========================================"
-            echo "  部署完成 — $(date)"
-            echo "========================================"
 
   # ============================================
   # Job 4: 结果通知
