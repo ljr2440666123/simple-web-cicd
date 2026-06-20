@@ -1,17 +1,19 @@
 # ============================================================
-# Simple Web CI/CD — Flask + Docker
+# Simple Web CI/CD Pipeline — Flask + Docker + GitHub Actions
 #
-# 流水线:
-#   1. validate → 安装依赖 + 运行测试
-#   2. build    → 构建 Docker 镜像 + 导出 tar
-#   3. deploy   → SCP 传输 tar + docker load + 启动
+# 四阶段流水线 (Four-stage Pipeline):
+#   1. validate → 安装依赖 + 代码审查 + 单元测试
+#   2. build    → 构建 Docker 镜像 + 导出 tar 压缩包
+#   3. deploy   → SCP 传输到 ECS + docker load + 启动容器
+#   4. notify   → 汇总所有阶段结果
 #
 # 关键设计: 镜像在 GitHub Actions 端构建，打成 tar 传到 ECS，
-#           彻底绕过 ECS 访问 Docker Hub 的问题！
+#           彻底绕过 ECS 访问 Docker Hub 的网络问题！
 # ============================================================
 
-name: Flask CI/CD
+name: Flask CI/CD Pipeline
 
+# 触发条件
 on:
   push:
     branches: [main]
@@ -19,55 +21,112 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# 全局变量
+env:
+  IMAGE_NAME: simple-web
+  IMAGE_TAG: latest
+  DEPLOY_DIR: /opt/simple-web
+
 jobs:
+
   # ============================================
-  # Job 1: 代码验证 + 测试
+  # Job 1: 代码验证 — 安装依赖 + 运行单元测试
   # ============================================
   validate:
-    name: "① 验证 & 测试"
+    name: "① 代码验证 & 单元测试"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: 检出代码
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
 
-      - name: 安装依赖
-        run: pip install -r requirements.txt
+      - name: 缓存 pip 依赖
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
-      - name: 运行测试
-        run: python -m pytest test_app.py -v
+      - name: 安装项目依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 运行单元测试
+        run: |
+          python -m pytest test_app.py -v --tb=short
+
+      - name: 显示项目文件结构
+        run: |
+          echo "=== 项目文件结构 ==="
+          find . -type f -not -path '*/\.git/*' | sort
+          echo ""
+          echo "=== 依赖列表 ==="
+          pip list
 
   # ============================================
-  # Job 2: 构建 Docker 镜像 → 导出 tar
+  # Job 2: 构建 Docker 镜像 — 仅在 push 到 main 时执行
   # ============================================
   build:
-    name: "② 构建镜像"
+    name: "② 构建 Docker 镜像"
     needs: validate
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - name: 检出代码
+        uses: actions/checkout@v4
 
-      - name: 构建 Docker 镜像
-        run: docker build -t simple-web:latest .
+      - name: 设置镜像标签（带 commit hash）
+        id: image-tag
+        run: |
+          echo "IMAGE_FULL_TAG=${{ env.IMAGE_NAME }}:${{ github.sha }}" >> $GITHUB_OUTPUT
+          echo "使用标签: ${{ env.IMAGE_NAME }}:${{ github.sha }}"
 
-      - name: 导出镜像为 tar
-        run: docker save simple-web:latest -o /tmp/simple-web.tar
+      - name: 构建 Docker 镜像（分层缓存）
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      - name: 压缩镜像（减小体积）
-        run: gzip -f /tmp/simple-web.tar
+      - name: 查看镜像信息
+        run: |
+          echo "=== 构建完成的镜像 ==="
+          docker images | grep ${{ env.IMAGE_NAME }}
+          echo ""
+          echo "=== 镜像大小 ==="
+          docker image inspect ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} --format='{{.Size}} bytes'
+
+      - name: 导出镜像为 tar 压缩包
+        run: |
+          echo "正在导出镜像..."
+          docker save \
+            ${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} \
+            -o /tmp/simple-web.tar
+          echo "导出完成，正在压缩..."
+          gzip -f /tmp/simple-web.tar
+          ls -lh /tmp/simple-web.tar.gz
 
       - name: 上传镜像 artifact
         uses: actions/upload-artifact@v4
         with:
           name: docker-image
           path: /tmp/simple-web.tar.gz
-          retention-days: 1
+          retention-days: 7
 
   # ============================================
-  # Job 3: 部署到阿里云 ECS
+  # Job 3: 部署到 ECS 云服务器 — 仅在 main 分支
   # ============================================
   deploy:
     name: "③ 部署至 ECS"
@@ -77,80 +136,144 @@ jobs:
     environment:
       name: production
     steps:
-      - uses: actions/checkout@v4
+      - name: 检出代码
+        uses: actions/checkout@v4
 
-      - name: 下载镜像 artifact（放到工作区）
+      - name: 下载镜像 artifact
         uses: actions/download-artifact@v4
         with:
           name: docker-image
           path: ./
 
-      - name: 传输 compose + 镜像到服务器
+      - name: 验证文件
+        run: |
+          echo "=== 当前目录文件 ==="
+          ls -lh simple-web.tar.gz docker-compose.prod.yml
+          echo ""
+          echo "=== 文件大小 ==="
+          du -h simple-web.tar.gz
+
+      - name: 传输镜像和 compose 文件到服务器
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USERNAME }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
           source: "docker-compose.prod.yml,simple-web.tar.gz"
-          target: "/opt/simple-web/"
+          target: "${{ env.DEPLOY_DIR }}/"
           strip_components: 0
 
-      - name: 加载镜像并启动服务
+      - name: 在服务器上加载镜像并启动服务
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USERNAME }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
           script: |
             set -e
-            cd /opt/simple-web
+            cd ${{ env.DEPLOY_DIR }}
 
-            echo "=== [1/5] 加载 Docker 镜像 ==="
+            echo "========================================"
+            echo " 开始部署 — $(date)"
+            echo "========================================"
+
+            echo ""
+            echo "=== [1/6] 检查 Docker 环境 ==="
+            docker --version
+            docker compose version
+
+            echo ""
+            echo "=== [2/6] 解压并加载 Docker 镜像 ==="
             gunzip -f simple-web.tar.gz
+            echo "  加载镜像中..."
             docker load -i simple-web.tar
             rm -f simple-web.tar
+            echo "  当前镜像:"
+            docker images | grep simple-web
 
-            echo "=== [2/5] 复制 compose 文件 ==="
+            echo ""
+            echo "=== [3/6] 准备 compose 配置 ==="
             cp docker-compose.prod.yml docker-compose.yml
+            cat docker-compose.yml
 
-            echo "=== [3/5] 停止旧容器 ==="
+            echo ""
+            echo "=== [4/6] 停止并清理旧容器 ==="
             docker compose down --remove-orphans || true
+            docker container prune -f 2>/dev/null || true
 
-            echo "=== [4/5] 启动新容器 ==="
+            echo ""
+            echo "=== [5/6] 启动新容器 ==="
             docker compose up -d
-
-            echo "=== [5/5] 健康检查 ==="
             sleep 3
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:80 || echo "000")
+
+            echo ""
+            echo "=== [6/6] 健康检查 ==="
+            echo "  容器状态:"
+            docker compose ps
+            echo ""
+            echo "  容器日志:"
+            docker compose logs --tail=30
+            echo ""
+
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:80 2>/dev/null || echo "000")
+            echo "  HTTP 响应码: $HTTP_CODE"
             if [ "$HTTP_CODE" = "200" ]; then
-              echo "✅ 部署成功！HTTP: $HTTP_CODE"
+              echo "  ✅ 部署成功！"
+              echo ""
+              echo "  响应内容:"
+              curl -s http://localhost:80 | head -5
             else
-              echo "⚠️  返回 $HTTP_CODE，查看日志："
-              docker compose logs --tail=20
+              echo "  ⚠️  返回 $HTTP_CODE，部署可能存在问题"
+              echo ""
+              echo "  详细日志:"
+              docker compose logs
+              exit 1
             fi
 
             echo ""
-            echo "=== 运行状态 ==="
-            docker compose ps
+            echo "========================================"
+            echo "  部署完成 — $(date)"
+            echo "========================================"
 
   # ============================================
-  # Job 4: 通知
+  # Job 4: 结果通知
   # ============================================
   notify:
-    name: "④ 结果通知"
+    name: "④ 流水线结果汇总"
     needs: [validate, build, deploy]
     runs-on: ubuntu-latest
     if: always()
     steps:
-      - name: 汇总
+      - name: 汇总各阶段结果
         run: |
-          echo "========================================="
-          echo "  CI/CD 流水线完成"
-          echo "========================================="
-          echo "  ① 验证测试 : ${{ needs.validate.result }}"
+          echo "========================================"
+          echo "        CI/CD 流水线执行报告"
+          echo "========================================"
+          echo ""
+          echo "  触发事件: ${{ github.event_name }}"
+          echo "  分支:     ${{ github.ref_name }}"
+          echo "  Commit:   ${{ github.sha }}"
+          echo "  触发者:   ${{ github.actor }}"
+          echo ""
+          echo "----------------------------------------"
+          echo "  阶段执行情况"
+          echo "----------------------------------------"
+          echo "  ① 代码验证 : ${{ needs.validate.result }}"
           echo "  ② 构建镜像 : ${{ needs.build.result }}"
           echo "  ③ 生产部署 : ${{ needs.deploy.result }}"
-          echo "========================================="
+          echo "----------------------------------------"
+          echo ""
           if [ "${{ needs.deploy.result }}" = "success" ]; then
-            echo "  🌐 http://${{ secrets.SSH_HOST }}"
+            echo "  🎉 流水线全部通过！"
+            echo "  🌐 访问地址: http://${{ secrets.SSH_HOST }}"
+          elif [ "${{ needs.validate.result }}" = "success" ] && \
+               [ "${{ needs.build.result }}" = "skipped" ]; then
+            echo "  ✅ 代码验证通过（PR 模式，跳过构建和部署）"
+          else
+            echo "  ❌ 流水线存在失败环节，请检查上方日志"
+            exit 1
           fi
+          echo ""
+          echo "========================================"

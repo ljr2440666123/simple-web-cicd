@@ -26,4 +26,12 @@ def test_health_check(client):
     """健康检查接口应返回 healthy"""
     rv = client.get("/health")
     assert rv.status_code == 200
-    assert rv.get_json()["status"] == "healthy"
+    data = rv.get_json()
+    assert data["status"] == "healthy"
+    assert data["service"] == "simple-web"
+
+
+def test_404_for_unknown_route(client):
+    """未定义路由应返回 404"""
+    rv = client.get("/nonexistent")
+    assert rv.status_code == 404

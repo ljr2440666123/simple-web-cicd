@@ -1,11 +1,13 @@
-"""
-极简 Flask Web 应用 — CI/CD 实验演示
-"""
+"""极简 Flask Web 应用 — CI/CD 实验演示"""
+import os
+import socket
+import platform
+import datetime
 from flask import Flask, render_template_string
 
 app = Flask(__name__)
 
-HTML = """<!DOCTYPE html>
+HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -47,22 +49,30 @@ HTML = """<!DOCTYPE html>
 </html>"""
 
 
+def get_environment():
+    """获取当前运行环境（从环境变量 FLASK_ENV 或 APP_ENV 读取）"""
+    env = os.environ.get("FLASK_ENV", "").lower()
+    if env == "production" or os.environ.get("APP_ENV", "").lower() == "production":
+        return "Production"
+    return "Development"
+
+
 @app.route("/")
 def index():
-    import socket, platform, datetime
     return render_template_string(
-        HTML,
+        HTML_TEMPLATE,
         python_version=platform.python_version(),
         hostname=socket.gethostname(),
         deploy_time=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        environment="Production" if app.config.get("ENV") == "production" else "Development",
+        environment=get_environment(),
     )
 
 
 @app.route("/health")
 def health():
-    return {"status": "healthy"}, 200
+    return {"status": "healthy", "service": "simple-web"}, 200
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, debug=True)
+    debug_mode = os.environ.get("FLASK_DEBUG", "0") == "1"
+    app.run(host="0.0.0.0", port=8080, debug=debug_mode)

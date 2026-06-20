@@ -9,5 +9,8 @@ COPY app.py .
 
 EXPOSE 8080
 
-ENV FLASK_ENV=production
+ENV APP_ENV=production
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
 CMD ["python", "app.py"]
