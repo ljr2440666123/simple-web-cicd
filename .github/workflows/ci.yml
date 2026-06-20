@@ -88,20 +88,15 @@ jobs:
           echo "IMAGE_FULL_TAG=${{ env.IMAGE_NAME }}:${{ github.sha }}" >> $GITHUB_OUTPUT
           echo "使用标签: ${{ env.IMAGE_NAME }}:${{ github.sha }}"
 
-      - name: 构建 Docker 镜像（分层缓存）
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          load: true
-          tags: |
-            ${{ env.IMAGE_NAME }}:${{ github.sha }}
-            ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: 查看镜像信息
+      - name: 构建 Docker 镜像
         run: |
-          echo "=== 构建完成的镜像 ==="
+          echo "=== 构建镜像 ==="
+          docker build -t ${{ env.IMAGE_NAME }}:${{ github.sha }} .
+          docker tag ${{ env.IMAGE_NAME }}:${{ github.sha }} ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          echo "=== 构建完成 ==="
           docker images | grep ${{ env.IMAGE_NAME }}
           echo ""
           echo "=== 镜像大小 ==="

@@ -1,6 +1,13 @@
 services:
   web:
     build: .
+    image: simple-web:latest
     ports:
       - "8080:8080"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; r = urllib.request.urlopen('http://localhost:8080/health'); assert r.status == 200"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
